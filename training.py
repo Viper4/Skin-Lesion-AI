@@ -8,8 +8,7 @@ from PIL import Image
 import io
 import math
 import os
-import multiprocessing as mp
-from multiprocessing import Pool
+from tqdm import tqdm
 
 
 class SkinLesionNN(nn.Module):
@@ -69,53 +68,6 @@ class SkinLesionNN(nn.Module):
         return x
 
 
-# Has to be separate from class to prevent caching tons of data
-def process_data(metadata, zf, transform, min_age, max_age):
-    images = []
-    metadata_features = []
-    labels = []
-    for index, row in metadata.iterrows():
-        if index % 100 == 0:
-            print(f"Processing image {index}/{len(metadata)}")
-        image_data = zf.read("ISIC_2019_Training_Input/" + row["image"] + ".jpg")
-        image = Image.open(io.BytesIO(image_data)).convert("RGB")
-        if transform:
-            image = transform(image)
-
-        if math.isnan(row["age_approx"]):
-            age = 0
-        else:
-            age = (row["age_approx"] - min_age) / (max_age - min_age)
-
-        if row["sex"] == "male":
-            sex = 0
-        else:
-            sex = 1
-
-        site = [0, 0, 0, 0, 0, 0]
-        site_mapping = {
-            "head/neck": 0,
-            "upper extremity": 1,
-            "posterior torso": 2,
-            "anterior torso": 3,
-            "lower extremity": 4,
-            "palms/soles": 5
-        }
-        if row["anatom_site_general"] in site_mapping:
-            site[site_mapping[row["anatom_site_general"]]] = 1
-
-        if str(row["lesion_id"]) == "nan":
-            diagnosis = 0
-        else:
-            diagnosis = 1
-
-        images.append(image)
-        metadata_features.append([age, sex, *site])
-        labels.append(diagnosis)
-
-    return images, metadata_features, labels
-
-
 class SkinLesionDataset(Dataset):
     def __init__(self, image_path, metadata_path, transform=None, num_processes=16):
         self.image_path = image_path
@@ -141,22 +93,8 @@ class SkinLesionDataset(Dataset):
             self.max_age = metadata["age_approx"].max()
             print(f" Age range: {self.min_age} - {self.max_age}")
 
-            '''pool = Pool(processes=num_processes)
-            print(f"Loading images from {self.image_path}...")
             with zipfile.ZipFile(self.image_path) as zf:
-                self.images, self.metadata_features, self.labels = pool.apply_async(process_data,
-                                                                                    args=(metadata,
-                                                                                          zf,
-                                                                                          self.transform,
-                                                                                          self.min_age,
-                                                                                          self.max_age)).get()
-            pool.close()
-            pool.join()'''
-
-            with zipfile.ZipFile(self.image_path) as zf:
-                for index, row in metadata.iterrows():
-                    if index % 100 == 0:
-                        print(f"Processing image {index}/{len(metadata)}")
+                for row in tqdm(metadata.itertuples(), total=len(metadata)):
                     image_data = zf.read("ISIC_2019_Training_Input/" + row["image"] + ".jpg")
                     image = Image.open(io.BytesIO(image_data)).convert("RGB")
                     if self.transform:
@@ -213,40 +151,44 @@ class SkinLesionDataset(Dataset):
 
 class Trainer:
     def __init__(self, image_path, metadata_path):
-        self.dataset = SkinLesionDataset(image_path, metadata_path, self.get_transform())
+        self.dataset = SkinLesionDataset(image_path, metadata_path, self.get_transform(True))
         train_size = int(0.8 * len(self.dataset))
         validate_size = len(self.dataset) - train_size
         self.train_dataset, self.validate_dataset = torch.utils.data.random_split(self.dataset, [train_size, validate_size])
 
     @staticmethod
-    def get_transform():
-        return transforms.Compose([
-            transforms.Resize((224, 224)),  # Resize to input dimensions
-            transforms.RandomHorizontalFlip(),  # Data augmentation
-            transforms.RandomVerticalFlip(),  # Data augmentation
-            transforms.RandomRotation(20),  # Data augmentation
-            transforms.ColorJitter(brightness=0.1, contrast=0.1),  # For skin lesions
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet stats
-        ])
+    def get_transform(augment):
+        if augment:
+            return transforms.Compose([
+                transforms.Resize((224, 224)),  # Resize to input dimensions
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomVerticalFlip(),
+                transforms.RandomRotation(20),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet stats
+            ])
+        else:
+            return transforms.Compose([
+                transforms.Resize((224, 224)),  # Resize to input dimensions
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet stats
+            ])
 
     def train(self, model, criterion, optimizer, epochs):
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=32,
             shuffle=True,
-            num_workers=4,  # Adjust based on CPU cores
             pin_memory=True,  # Speed up host to GPU transfers
-            prefetch_factor=2  # Prefetch batches
         )
         validate_loader = DataLoader(
             self.validate_dataset,
             batch_size=32,
             shuffle=True,
-            num_workers=4,  # Adjust based on CPU cores
             pin_memory=True,  # Speed up host to GPU transfers
         )
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Training on: {device}")
         model = model.to(device)
 
@@ -255,8 +197,8 @@ class Trainer:
         best_acc = 0.0
         best_model = None
 
-        for epoch in range(epochs):
-            print(f"Epoch {epoch + 1}/{epochs}")
+        for epoch in tqdm(range(epochs)):
+            print(f"\nStarting training on epoch {epoch + 1}/{epochs}...")
             model.train()
             running_loss = 0.0
             for batch in train_loader:
@@ -294,7 +236,7 @@ class Trainer:
             if acc > best_acc:
                 best_acc = acc
                 best_model = model
-                torch.save(model.state_dict(), "skin_lesion_cnn.pt")
+                torch.save(model.state_dict(), "skin_lesion_model.pt")
 
         print("Training complete")
         return best_model
@@ -327,7 +269,7 @@ class Trainer:
 if __name__ == "__main__":
     trainer = Trainer("Data/ISIC_2019_Training_Input.zip", "Data/ISIC_2019_Training_Metadata.csv")
     model = SkinLesionNN(8)
-    if os.path.exists("skin_lesion_cnn.pt"):
-        model.load_state_dict(torch.load("skin_lesion_cnn.pt"))
+    if os.path.exists("skin_lesion_model.pt"):
+        model.load_state_dict(torch.load("skin_lesion_model.pt"))
 
     model = trainer.train(model, nn.BCEWithLogitsLoss(), torch.optim.Adam(model.parameters(), lr=0.001), 100)

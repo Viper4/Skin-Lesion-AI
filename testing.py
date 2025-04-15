@@ -8,12 +8,11 @@ import io
 if __name__ == "__main__":
     model = training.SkinLesionNN(8)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    if os.path.exists("skin_lesion_cnn.pt"):
-        model.load_state_dict(torch.load("skin_lesion_cnn.pt", weights_only=False))
+    if os.path.exists("skin_lesion_model.pt"):
+        model.load_state_dict(torch.load("skin_lesion_model.pt", weights_only=False))
         model = model.to(device)
         model.eval()
         print("Model loaded")
-        print(model)
     else:
         print("Model not found")
         exit()
@@ -21,7 +20,7 @@ if __name__ == "__main__":
     image_path = "Data/" + input("Enter image filename: ")
     image_data = open(image_path, "rb").read()
     image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    transform = training.Trainer.get_transform()
+    transform = training.Trainer.get_transform(False)
     image = transform(image).to(device)
 
     age = int(input("Enter age: "))
@@ -32,8 +31,8 @@ if __name__ == "__main__":
 
     metadata = torch.tensor([age, sex, *site], dtype=torch.float).to(device)
 
-    print(image)
-    print(metadata)
-    prediction = model.forward(image, metadata)
-    print(prediction)
+    print("Predicting...")
+    # Make prediction
+    prediction = model.forward(image.unsqueeze(0), metadata.unsqueeze(0))
+    print("Probability malignant: ", prediction)
 
